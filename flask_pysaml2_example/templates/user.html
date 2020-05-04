@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block title %}PySAML2 Example{% endblock %}
+{% block content %}
+<div class="card">
+    <div class="card-header">Current user</div>
+    <div class="card-body">
+        <dl>
+            <dt>email</dt>
+            <dd>{{ current_user.email }}</dd>
+            <dt>last_name</dt>
+            <dd>{{ current_user.last_name }}</dd>
+            <dt>first_name</dt>
+            <dd>{{ current_user.first_name }}</dd>
+        </dl> 
+    </div>
+</div>
+
+{% if session.saml_attributes %}
+<div class="card">
+    <div class="card-header">SAML Attributes</div>
+    <div class="card-body">
+        <pre><code>{{ session.saml_attributes }}</code></pre>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}

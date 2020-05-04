@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+{% block title %}PySAML2 Example{% endblock %}
+{% block content %}
+{% if current_user.is_authenticated %}
+<div class="card">
+    <div class="card-header">Current user</div>
+    <div class="card-body">
+        <dl>
+            <dt>email</dt>
+            <dd>{{ current_user.email }}</dd>
+            <dt>last_name</dt>
+            <dd>{{ current_user.last_name }}</dd>
+            <dt>first_name</dt>
+            <dd>{{ current_user.first_name }}</dd>
+        </dl> 
+    </div>
+    <a href="{{ url_for('user') }}" class="btn btn-primary">Go to User page</a>
+</div>
+{% else %}
+    {% for idp_name in idp_names %}
+        <a class="btn btn-primary" href="{{ url_for('auth.saml_login', idp_name=idp_name) }}">Login with {{idp_name}}</a>
+    {% endfor %}
+{% endif %}{# if current_user.is_authenticated #}
+{% endblock %}
