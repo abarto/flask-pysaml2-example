@@ -4,8 +4,7 @@ from flask import abort, Blueprint, current_app, redirect, request, session, url
 from flask_login import login_required, login_user, logout_user
 from saml2 import (
     BINDING_HTTP_POST,
-    BINDING_HTTP_REDIRECT,
-    entity,
+    BINDING_HTTP_REDIRECT
 )
 from saml2.client import Saml2Client
 from saml2.config import Config as Saml2Config
@@ -97,7 +96,7 @@ def saml_sso(idp_name):
 
         authn_response = saml_client.parse_authn_request_response(
             request.form['SAMLResponse'],
-            entity.BINDING_HTTP_POST
+            BINDING_HTTP_POST
         )
 
         current_app.logger.info('authn_response: %s', authn_response)
