@@ -1,0 +1,10 @@
+version: "3"
+
+services:
+  flask_pysaml2_example:
+    build:
+      context: .
+    volumes:
+      - .:/app
+    entrypoint: ["poetry", "run", "gunicorn", "--bind", "127.0.0.1:5000", "flask_pysaml2_example:create_app()"]
+    network_mode: "host"

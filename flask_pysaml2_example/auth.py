@@ -118,6 +118,8 @@ def saml_sso(idp_name):
             db_session = db.session()
             user = User(
                 email=user_id,
+
+                # These user attributes are supplied by the IdP.
                 first_name=authn_response.ava['FirstName'][0],
                 last_name=authn_response.ava['LastName'][0]
             )
@@ -141,6 +143,7 @@ def saml_sso(idp_name):
         return redirect(redirect_url)
     except Exception as e:
         current_app.logger.exception('Exception raised during SAML SSO login')
+        raise e
         abort(401)
 
 

@@ -29,12 +29,8 @@ def create_app(test_config=None):
             # metadata_url: This is the metadata URL for the IDP.
             #
             # 'example-oktadev': {
-            #    'entityid': 'http://<replace-me>.ngrok.io/auth/saml/sso/flask-pysaml2-example',
-            #    'metadata_url': 'http://idp.oktadev.com/metadata'
-            # },
-            # 'example-okta': {
-            #    'entityid': 'http://53d17b6f.ngrok.io/auth/saml/sso/example-okta',
-            #    'metadata_url': 'https://dev-123456.okta.com/app/9yebOuL2hbQFhl3iZcCw/sso/saml/metadata'
+            #    'entityid': 'http://flask-pysaml2-example',
+            #    'metadata_url': 'https://<dev-account>.okta.com/app/<app-id>/sso/saml/metadata'
             # },
         }
     )
@@ -51,8 +47,7 @@ def create_app(test_config=None):
 
     db.init_app(app)
 
-    @app.before_first_request
-    def setup_db():
+    with app.app_context():
         from .orm import User
         db.create_all()
 
