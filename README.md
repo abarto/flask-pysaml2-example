@@ -129,7 +129,7 @@ $ docker compose up
 
    - Open [saml.oktadev.com](http://saml.oktadev.com) in your browser and fill out as follows:
         
-     - **Issuer:** "http://www.okta.com/<okta-org-key>"
+     - **Issuer:** "urn:example:idp"
      - **SAML ACS URL:** "http://<replace-me>.ngrok.io/saml/sso/example-oktadev"
      - **SAML Audience URI:** "http://flask-pysaml2-example"
         
