@@ -87,6 +87,15 @@ def saml_client_for(idp_name):
     return saml2_client
 
 
+def _is_safe_redirect_url(url: str) -> bool:
+    """Checks if the redirect URL is safe."""
+    return (
+        not url.startswith('http://') and 
+        not url.startswith('https://') or
+        url.startswith(current_app.config.get('ALLOWED_REDIRECT_DOMAINS', []))
+    )
+
+
 @auth_blueprint.route("/saml/sso/<idp_name>", methods=['POST'])
 def saml_sso(idp_name):
     try:
@@ -132,18 +141,19 @@ def saml_sso(idp_name):
 
         redirect_url = url_for('user')
 
-        # NOTE:
-        #   On a production system, the RelayState MUST be checked
-        #   to make sure it doesn't contain dangerous URLs!
+        # Replace the existing RelayState handling
         if request.form.get('RelayState'):
             redirect_url = request.form['RelayState']
+            if not _is_safe_redirect_url(redirect_url):
+                current_app.logger.warning('Potentially malicious RelayState URL blocked')
+                redirect_url = url_for('user')
 
-        current_app.logger.info('redirect_url: %s', authn_response)
+        current_app.logger.debug('Processing SAML response')
+        current_app.logger.info('User %s successfully authenticated via SAML', user_id)
 
         return redirect(redirect_url)
     except Exception as e:
         current_app.logger.exception('Exception raised during SAML SSO login')
-        raise e
         abort(401)
 
 
