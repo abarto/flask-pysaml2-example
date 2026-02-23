@@ -1,149 +1,141 @@
 # Introduction
 
-This is an example SAML SP service written using [Flask](https://palletsprojects.com/p/flask/)
-and [pysaml2](https://github.com/rohe/pysaml2). It is an attempt at modernizing
-an [existing project](https://github.com/jpf/okta-pysaml2-example) while also following
-the design used in Flask's tutorial project.
+This project is a SAML Service Provider (SP) example built with
+[Flask](https://palletsprojects.com/p/flask/) and
+[pysaml2](https://github.com/IdentityPython/pysaml2).
+
+It demonstrates a complete SP-initiated SSO flow and includes defaults that are
+safer for real-world deployments:
+
+- AuthnRequest/Response correlation using request IDs.
+- RelayState validation to prevent open redirects.
+- Cached IdP metadata fetch with timeout.
+- Configurable SAML attribute mapping for JIT provisioning.
+- SP metadata endpoint for easier IdP onboarding.
+
+## What this example includes
+
+- Login start endpoint: `/auth/saml/login/<idp_name>`
+- Assertion Consumer Service (ACS): `/auth/saml/sso/<idp_name>`
+- SP metadata endpoint: `/auth/saml/metadata/<idp_name>`
+- Local user session with `flask-login`
+- JIT user provisioning into SQLite
 
 # Requirements
 
-- [python](https://www.python.org/) 3.6+
-- [virtualenv](https://virtualenv.pypa.io/en/latest/) (or [conda](https://docs.conda.io/en/latest/))
+- [python](https://www.python.org/) 3.11+
 - [poetry](https://python-poetry.org/)
 
-You will also need a development environment capable of compiling Python packages and the
-"libffi" and "libxmlsec1" development libraries, which are needed by PySAML2.
-
-Instructions for installing these development libraries will differ depending on your
-host operating system.
-
-Optionally, you will also need to install [ngrok](https://ngrok.com/download) if you want to validate
-the SP externally.
+You also need build dependencies for PySAML2 (`libffi` and `xmlsec1`).
 
 ## Mac OS X
 
 ```shell
-$ brew install libffi libxmlsec1
+brew install libffi libxmlsec1
 ```
 
-## RHEL/Fedora/CentOs
+## RHEL/Fedora/CentOS
 
 ```shell
-$ sudo yum install libffi-devel xmlsec1 xmlsec1-openssl
+sudo yum install libffi-devel xmlsec1 xmlsec1-openssl
 ```
 
 ## Debian/Ubuntu
 
 ```shell
-$ sudo apt-get install libffi-dev xmlsec1 libxmlsec1-openssl
+sudo apt-get install libffi-dev xmlsec1 libxmlsec1-openssl
 ```
 
 # Installation
 
-## virtualenv
-
 ```shell
-$ poetry install 
+poetry install
 ```
 
-## conda
+# Configuration
+
+Prefer config file or environment variables over editing application code.
+
+## Option A: instance config file
+
+Create `instance/config.py` and start from
+[`config.py.example`](./config.py.example).
+
+## Option B: environment variable for IdP settings
+
+You can pass IdP settings as JSON:
 
 ```shell
-$ conda create --name flask-pysaml2-example python=3
-$ conda activate flask-pysaml2-example
-$ pip install poetry
-$ poetry install
+export SAML_IDP_SETTINGS_JSON='{"example-oktadev":{"entityid":"http://flask-pysaml2-example","metadata_url":"https://dev-12345678.okta.com/app/foobar/sso/saml/metadata","want_response_signed":true}}'
 ```
 
 # Running
 
- ```shell
-$ FLASK_APP=flask_pysaml2_example flask run
- ```
+```shell
+FLASK_APP=flask_pysaml2_example FLASK_DEBUG=1 flask run --port 5000
+```
 
- Additionally you can use `docker compose` to start the service:
+Or with Docker:
 
 ```shell
-$ docker compose up
- ```
+docker compose up
+```
 
- # Testing
+# SAML Flow (SP-Initiated)
 
- The fastest way to test this example SAML SP is to use the [saml.oktadev.com](http://saml.oktadev.com/) service.
+```text
+Browser -> Flask SP: GET /auth/saml/login/<idp>
+Flask SP -> Browser: 302 to IdP SSO URL (+ AuthnRequest, RelayState)
+Browser -> IdP: AuthnRequest
+IdP -> Browser: HTML form POST (SAMLResponse + RelayState)
+Browser -> Flask SP: POST /auth/saml/sso/<idp>
+Flask SP: verify response, verify InResponseTo, provision user, create session
+Flask SP -> Browser: 302 to safe RelayState (or /user)
+```
 
- 1. Edit the `flask_pysaml2_example/__init__.py` file and edit the appropriate entry in the `SAML_IDP_SETTINGS` Flask config value, changing this:
-    
-     ```python
-     app.config.from_mapping(
-        SECRET_KEY='dev',
-        SQLALCHEMY_TRACK_MODIFICATIONS=False,
-        SQLALCHEMY_DATABASE_URI=f'sqlite:///{Path(app.instance_path) / "flask_pysaml2_example.sql"}',
-        SAML_IDP_SETTINGS={
-            # Add the settings for each IDP you want to use. Each entry in the
-            # dictionary requires to keys:
-            #
-            # entityid: An identifier for the SP. Usually this is the same as the Single Sign On URL.
-            #           It will default to the SSO URL if left empty or undefined.
-            # metadata_url: This is the metadata URL for the IDP.
-            #
-            # This configuration can be used with https://developer.okta.com/
-            # 'example-oktadev': {
-            #    'entityid': 'http://flask-pysaml2-example',
-            #    'metadata_url': 'https://<dev-account>.okta.com/app/<app-id>/sso/saml/metadata'
-            # },
-        }
-     )
-     ```
+# Quick Validation with saml.oktadev.com
 
-     to this (Using the `metadata_url` value exposed by the IdP):
+1. Run the Flask app and expose it through ngrok:
 
-     ```python
-     app.config.from_mapping(
-        SECRET_KEY='dev',
-        SQLALCHEMY_TRACK_MODIFICATIONS=False,
-        SQLALCHEMY_DATABASE_URI=f'sqlite:///{Path(app.instance_path) / "flask_pysaml2_example.sql"}',
-        SAML_IDP_SETTINGS={
-            'example-oktadev': {
-                'entityid': 'http://flask-pysaml2-example',
-                'metadata_url': 'https://dev-12345678.okta.com/app/foobar/sso/saml/metadata'
-            }
-        }
-     )
-     ```
+```shell
+ngrok http 5000
+```
 
-2. Start the example SAML SP
-    
-     ```shell
-     $ FLASK_APP=flask_pysaml2_example FLASK_DEBUG=1 flask run --port 5000
-     ```
+2. Open `http://saml.oktadev.com` and configure:
 
-3. Start ngrok on the port that the example SAML SP is running on, in this case 5000/tcp.
-    
-     ```shell
-     $ ngrok http 5000
-     ```
+- `Issuer`: `urn:example:idp`
+- `SAML ACS URL`: `http://<replace-me>.ngrok.io/auth/saml/sso/example-oktadev`
+- `SAML Audience URI`: `http://flask-pysaml2-example`
 
-4. Replace the "<replace-me>" place holder with the assigned ngrok sub-domain. If Flask was started using `FLASK_DEBUG=1`, the application will be restarted automatically, otherwise, you'll have to stop it and start it again.
+3. (Recommended) import SP metadata from:
 
-5. Run [saml.oktadev.com](http://saml.oktadev.com) to test this example SAML SP
+- `http://<replace-me>.ngrok.io/auth/saml/metadata/example-oktadev`
 
-   - Open [saml.oktadev.com](http://saml.oktadev.com) in your browser and fill out as follows:
-        
-     - **Issuer:** "urn:example:idp"
-     - **SAML ACS URL:** "http://<replace-me>.ngrok.io/saml/sso/example-oktadev"
-     - **SAML Audience URI:** "http://flask-pysaml2-example"
-        
-     Be sure to replace the string "<replace-me>" with the sub-domain that ngrok selected for you!
-    
-   - Click the "Submit" button.
+4. Submit and verify login succeeds.
 
-   - If the interaction was successful, the output will be similar to one in the following screenshot: ![img](./docs/_static/validation-success.png)
+If successful, output will be similar to:
+![img](./docs/_static/validation-success.png)
 
-The application can also be used to follow the ["SAML-enable your Python application"](https://developer.okta.com/code/python/pysaml2/)
-guide.
+# Security Validation
 
-# Testing the security of your SAML SP
+After basic validation, run the extended checks in saml.oktadev.com using
+**Run security validation**.
 
-After successfully completing the steps in the "Testing" section above, select the "Run security
-validation" option to have saml.oktadev.com run an extended series of security tests against your
-SAML SP.
+# Minimal Production Checklist
+
+- Use HTTPS everywhere (ACS, metadata endpoint, app base URL).
+- Set a strong `SECRET_KEY`.
+- Keep `SESSION_COOKIE_SECURE=true` in production.
+- Keep `allow_unsolicited` disabled (enabled requests must be correlated).
+- Require signed assertions and preferably signed responses.
+- Validate RelayState against same-host or explicit allowlist.
+- Cache IdP metadata with timeout and monitor certificate rotation.
+- Log authentication events, but avoid logging full assertions/PII payloads.
+
+# Tests
+
+Run unit tests:
+
+```shell
+python3 -m unittest discover -s tests -p 'test_*.py'
+```

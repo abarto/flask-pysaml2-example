@@ -1,11 +1,13 @@
+import time
+
+from urllib.parse import urlparse
+from xml.sax.saxutils import escape
+
 import requests
 
-from flask import abort, Blueprint, current_app, redirect, request, session, url_for
+from flask import Blueprint, Response, abort, current_app, redirect, request, session, url_for
 from flask_login import login_required, login_user, logout_user
-from saml2 import (
-    BINDING_HTTP_POST,
-    BINDING_HTTP_REDIRECT
-)
+from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
 from saml2.client import Saml2Client
 from saml2.config import Config as Saml2Config
 
@@ -14,6 +16,77 @@ from .orm import User
 
 
 auth_blueprint = Blueprint('auth', __name__)
+_METADATA_CACHE = {}
+
+
+def _get_idp_settings(idp_name):
+    if idp_name not in current_app.config['SAML_IDP_SETTINGS']:
+        raise KeyError(f'Settings for IDP "{idp_name}" not found on SAML_IDP_SETTINGS.')
+    return current_app.config['SAML_IDP_SETTINGS'][idp_name]
+
+
+def _get_idp_metadata(metadata_url):
+    ttl = current_app.config.get('SAML_METADATA_CACHE_TTL_SECONDS', 3600)
+    timeout = current_app.config.get('SAML_METADATA_TIMEOUT_SECONDS', 5)
+    now = time.time()
+    cached_entry = _METADATA_CACHE.get(metadata_url)
+    if cached_entry and now - cached_entry['cached_at'] < ttl:
+        return cached_entry['metadata']
+
+    response = requests.get(metadata_url, timeout=timeout)
+    response.raise_for_status()
+    _METADATA_CACHE[metadata_url] = {
+        'metadata': response.text,
+        'cached_at': now,
+    }
+    return response.text
+
+
+def _is_safe_redirect_url(url):
+    parsed_url = urlparse(url)
+
+    if parsed_url.scheme in ('',) and not parsed_url.netloc:
+        return url.startswith('/')
+
+    if parsed_url.scheme not in ('http', 'https'):
+        return False
+
+    allowed_hosts = set(current_app.config.get('ALLOWED_REDIRECT_HOSTS', ()))
+    allowed_hosts.add(request.host)
+    return parsed_url.netloc in allowed_hosts
+
+
+def _resolve_relay_state(default_redirect):
+    relay_state = request.form.get('RelayState')
+    if not relay_state:
+        return default_redirect
+
+    if _is_safe_redirect_url(relay_state):
+        return relay_state
+
+    current_app.logger.warning('Unsafe RelayState was ignored')
+    return default_redirect
+
+
+def _get_attribute(available_attributes, attribute_names, default=''):
+    for attribute_name in attribute_names:
+        if attribute_name in available_attributes and available_attributes[attribute_name]:
+            return available_attributes[attribute_name][0]
+    return default
+
+
+def _build_sp_metadata_xml(idp_name):
+    idp_settings = _get_idp_settings(idp_name)
+    acs_url = url_for('auth.saml_sso', idp_name=idp_name, _external=True)
+    entity_id = idp_settings.get('entityid', acs_url)
+
+    return f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"{escape(entity_id)}\">
+  <md:SPSSODescriptor protocolSupportEnumeration=\"urn:oasis:names:tc:SAML:2.0:protocol\" WantAssertionsSigned=\"true\">
+    <md:AssertionConsumerService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST\" Location=\"{escape(acs_url)}\" index=\"1\" isDefault=\"true\" />
+  </md:SPSSODescriptor>
+</md:EntityDescriptor>
+""".strip()
 
 
 def load_user(user_id):
@@ -21,38 +94,19 @@ def load_user(user_id):
 
 
 def saml_client_for(idp_name):
-    """
-    Given the name of an IdP, return a configuation.
-    The configuration is a hash for use by saml2.config.Config
-    """
+    """Given the name of an IdP, return a configuration for saml2.config.Config."""
 
-    if idp_name not in current_app.config['SAML_IDP_SETTINGS']:
-        raise Exception(f'Settings for IDP "{idp_name}" not found on SAML_IDP_SETTINGS.')
-    
-    acs_url = url_for(
-        'auth.saml_sso',
-        idp_name=idp_name,
-        _external=True)
-    
-    https_acs_url = url_for(
-        'auth.saml_sso',
-        idp_name=idp_name,
-        _external=True,
-        _scheme='https')
+    idp_settings = _get_idp_settings(idp_name)
 
-    # SAML metadata changes very rarely. On a production system,
-    # this data should be cached as approprate for your production system.
-    rv = requests.get(current_app.config['SAML_IDP_SETTINGS'][idp_name]['metadata_url'])
+    acs_url = url_for('auth.saml_sso', idp_name=idp_name, _external=True)
+    https_acs_url = url_for('auth.saml_sso', idp_name=idp_name, _external=True, _scheme='https')
 
-    current_app.logger.debug('rv.rext: %s', rv.text)
-
-    entityid = current_app.config['SAML_IDP_SETTINGS'][idp_name].get('entityid', acs_url)
+    metadata = _get_idp_metadata(idp_settings['metadata_url'])
+    entityid = idp_settings.get('entityid', acs_url)
 
     settings = {
         'entityid': entityid,
-        'metadata': {
-            'inline': [rv.text],
-        },
+        'metadata': {'inline': [metadata]},
         'service': {
             'sp': {
                 'endpoints': {
@@ -60,134 +114,118 @@ def saml_client_for(idp_name):
                         (acs_url, BINDING_HTTP_REDIRECT),
                         (acs_url, BINDING_HTTP_POST),
                         (https_acs_url, BINDING_HTTP_REDIRECT),
-                        (https_acs_url, BINDING_HTTP_POST)
+                        (https_acs_url, BINDING_HTTP_POST),
                     ],
                 },
-                # Don't verify that the incoming requests originate from us via
-                # the built-in cache for authn request ids in pysaml2
-                'allow_unsolicited': True,
-                # Don't sign authn requests, since signed requests only make
-                # sense in a situation where you control both the SP and IdP
-                'authn_requests_signed': False,
+                # Validate responses against known authn request IDs.
+                'allow_unsolicited': False,
+                # Most IdPs support unsigned requests; keep this configurable.
+                'authn_requests_signed': idp_settings.get('authn_requests_signed', False),
                 'logout_requests_signed': True,
                 'want_assertions_signed': True,
-                'want_response_signed': False
+                'want_response_signed': idp_settings.get('want_response_signed', True),
             }
-        }
+        },
     }
-
-    current_app.logger.info('settings: %s', settings)
 
     saml2_config = Saml2Config()
     saml2_config.load(settings)
     saml2_config.allow_unknown_attributes = True
-    
-    saml2_client = Saml2Client(config=saml2_config)
-    
-    return saml2_client
+    return Saml2Client(config=saml2_config)
 
 
-def _is_safe_redirect_url(url: str) -> bool:
-    """Checks if the redirect URL is safe."""
-    return (
-        not url.startswith('http://') and 
-        not url.startswith('https://') or
-        url.startswith(current_app.config.get('ALLOWED_REDIRECT_DOMAINS', []))
-    )
-
-
-@auth_blueprint.route("/saml/sso/<idp_name>", methods=['POST'])
+@auth_blueprint.route('/saml/sso/<idp_name>', methods=['POST'])
 def saml_sso(idp_name):
     try:
         saml_client = saml_client_for(idp_name)
 
-        current_app.logger.debug('request.form: %s', request.form)
+        saml_response = request.form.get('SAMLResponse')
+        if not saml_response:
+            abort(401)
 
+        outstanding_requests = session.get('saml_outstanding_requests', {})
         authn_response = saml_client.parse_authn_request_response(
-            request.form['SAMLResponse'],
-            BINDING_HTTP_POST
+            saml_response,
+            BINDING_HTTP_POST,
+            outstanding=outstanding_requests,
         )
 
-        current_app.logger.info('authn_response: %s', authn_response)
-
         authn_response.get_identity()
-        
         subject = authn_response.get_subject()
+        user_id = subject.text if subject else None
+        if not user_id:
+            abort(401)
 
-        current_app.logger.info('subject: %s', subject)
+        in_response_to = getattr(authn_response, 'in_response_to', None)
+        if in_response_to:
+            outstanding_requests.pop(in_response_to, None)
+            session['saml_outstanding_requests'] = outstanding_requests
 
-        user_id = subject.text
-
-        # This is what as known as "Just In Time (JIT) provisioning".
-        # What that means is that, if a user in a SAML assertion
-        # isn't in the user store, we create that user first, then log them in
-
+        # This is known as "Just In Time (JIT) provisioning".
         user = load_user(user_id)
         if user is None:
             db_session = db.session()
+            attribute_mapping = current_app.config.get('SAML_ATTRIBUTE_MAPPING', {})
             user = User(
                 email=user_id,
-
-                # These user attributes are supplied by the IdP.
-                first_name=authn_response.ava['FirstName'][0],
-                last_name=authn_response.ava['LastName'][0]
+                first_name=_get_attribute(
+                    authn_response.ava,
+                    attribute_mapping.get('first_name', ('FirstName',)),
+                    default='',
+                ),
+                last_name=_get_attribute(
+                    authn_response.ava,
+                    attribute_mapping.get('last_name', ('LastName',)),
+                    default='',
+                ),
             )
             db_session.add(user)
             db_session.commit()
-        
-        session['saml_attributes'] = authn_response.ava
 
+        session['saml_attributes'] = authn_response.ava
         login_user(user)
 
-        redirect_url = url_for('user')
-
-        # Replace the existing RelayState handling
-        if request.form.get('RelayState'):
-            redirect_url = request.form['RelayState']
-            if not _is_safe_redirect_url(redirect_url):
-                current_app.logger.warning('Potentially malicious RelayState URL blocked')
-                redirect_url = url_for('user')
-
-        current_app.logger.debug('Processing SAML response')
+        redirect_url = _resolve_relay_state(url_for('user'))
         current_app.logger.info('User %s successfully authenticated via SAML', user_id)
-
         return redirect(redirect_url)
-    except Exception as e:
+    except Exception:
         current_app.logger.exception('Exception raised during SAML SSO login')
         abort(401)
 
 
-@auth_blueprint.route("/saml/login/<idp_name>")
+@auth_blueprint.route('/saml/login/<idp_name>')
 def saml_login(idp_name):
     saml_client = saml_client_for(idp_name)
-    reqid, info = saml_client.prepare_for_authenticate()
+    relay_state = request.args.get('next', url_for('user'))
+    if not _is_safe_redirect_url(relay_state):
+        relay_state = url_for('user')
+    reqid, info = saml_client.prepare_for_authenticate(relay_state=relay_state)
 
-    current_app.logger.info('reqid: %s', reqid)
-    current_app.logger.info('info: %s', info)
+    outstanding_requests = session.get('saml_outstanding_requests', {})
+    outstanding_requests[reqid] = relay_state
+    session['saml_outstanding_requests'] = outstanding_requests
 
-    redirect_url = None
-
-    # Select the IdP URL to send the AuthN request to
+    # Select the IdP URL to send the AuthN request to.
     _, redirect_url = next(filter(lambda k_v: k_v[0] == 'Location', info['headers']))
 
-    current_app.logger.info('redirect_url: %s', redirect_url)
-    
     response = redirect(redirect_url, code=302)
-    
-    # NOTE:
-    #   I realize I _technically_ don't need to set Cache-Control or Pragma:
-    #     http://stackoverflow.com/a/5494469
-    #   However, Section 3.2.3.2 of the SAML spec suggests they are set:
-    #     http://docs.oasis-open.org/security/saml/v2.0/saml-bindings-2.0-os.pdf
-    #   We set those headers here as a "belt and suspenders" approach,
-    #   since enterprise environments don't always conform to RFCs
+
+    # Section 3.2.3.2 of the SAML HTTP Redirect binding recommends disabling cache.
     response.headers['Cache-Control'] = 'no-cache, no-store'
     response.headers['Pragma'] = 'no-cache'
-    
     return response
 
 
-@auth_blueprint.route("/logout")
+@auth_blueprint.route('/saml/metadata/<idp_name>', methods=['GET'])
+def saml_metadata(idp_name):
+    try:
+        metadata_xml = _build_sp_metadata_xml(idp_name)
+        return Response(metadata_xml, mimetype='application/samlmetadata+xml')
+    except KeyError:
+        abort(404)
+
+
+@auth_blueprint.route('/logout')
 @login_required
 def logout():
     logout_user()

@@ -1,0 +1,36 @@
+"""Example configuration for local development.
+
+Copy selected values to `instance/config.py` or export matching environment
+variables before starting Flask.
+"""
+
+SECRET_KEY = 'change-me'
+SESSION_COOKIE_SECURE = False
+
+# Optional extra redirect hosts for RelayState validation.
+# The current host is always allowed.
+ALLOWED_REDIRECT_HOSTS = (
+    'localhost:5000',
+)
+
+# Cache IdP metadata and set request timeout when downloading metadata XML.
+SAML_METADATA_CACHE_TTL_SECONDS = 3600
+SAML_METADATA_TIMEOUT_SECONDS = 5
+
+# Configure how SAML attributes map into local user profile fields.
+SAML_ATTRIBUTE_MAPPING = {
+    'first_name': ('FirstName', 'first_name', 'givenName'),
+    'last_name': ('LastName', 'last_name', 'surname', 'sn'),
+}
+
+# Example configuration for two IdPs.
+SAML_IDP_SETTINGS = {
+    'example-oktadev': {
+        'entityid': 'http://flask-pysaml2-example',
+        'metadata_url': 'https://dev-12345678.okta.com/app/foobar/sso/saml/metadata',
+        # Keep false unless your IdP is configured to verify signed AuthnRequests.
+        'authn_requests_signed': False,
+        # Recommended true so the whole SAML response must be signed.
+        'want_response_signed': True,
+    },
+}

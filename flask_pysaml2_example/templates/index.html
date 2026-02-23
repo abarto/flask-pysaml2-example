@@ -18,7 +18,10 @@
 </div>
 {% else %}
     {% for idp_name in idp_names %}
-        <a class="btn btn-primary" href="{{ url_for('auth.saml_login', idp_name=idp_name) }}">Login with {{idp_name}}</a>
+        <div class="mb-3">
+            <a class="btn btn-primary" href="{{ url_for('auth.saml_login', idp_name=idp_name) }}">Login with {{ idp_name }}</a>
+            <a class="btn btn-outline-secondary" href="{{ url_for('auth.saml_metadata', idp_name=idp_name) }}">SP metadata for {{ idp_name }}</a>
+        </div>
     {% endfor %}
 {% endif %}{# if current_user.is_authenticated #}
 {% endblock %}
