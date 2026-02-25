@@ -1,20 +1,24 @@
-[tool.poetry]
+[project]
 name = "flask-pysaml2-example"
 version = "0.1.0"
-description = ""
-authors = ["Agustin Barto <abarto@gmail.com>"]
+description = "SAML Service Provider example built with Flask and pysaml2"
+authors = [{ name = "Agustin Barto", email = "abarto@gmail.com" }]
 readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "flask>=3.1.3,<4",
+  "pysaml2>=7.4.1,<8",
+  "flask-login>=0.6.2,<0.7",
+  "flask-sqlalchemy>=3.0.3,<4",
+  "gunicorn>=23.0.0,<24",
+]
 
+[tool.uv]
+package = true
 
-[tool.poetry.dependencies]
-python = "^3.11"
-flask = "^3.1.3"
-pysaml2 = "^7.4.1"
-flask-login = "^0.6.2"
-flask-sqlalchemy = "^3.0.3"
-gunicorn = "^23.0.0"
-
+[tool.setuptools.packages.find]
+include = ["flask_pysaml2_example*"]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

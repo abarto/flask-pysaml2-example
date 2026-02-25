@@ -24,7 +24,7 @@ safer for real-world deployments:
 # Requirements
 
 - [python](https://www.python.org/) 3.11+
-- [poetry](https://python-poetry.org/)
+- [uv](https://docs.astral.sh/uv/)
 
 You also need build dependencies for PySAML2 (`libffi` and `xmlsec1`).
 
@@ -49,7 +49,7 @@ sudo apt-get install libffi-dev xmlsec1 libxmlsec1-openssl
 # Installation
 
 ```shell
-poetry install
+uv sync
 ```
 
 # Configuration
@@ -72,7 +72,7 @@ export SAML_IDP_SETTINGS_JSON='{"example-oktadev":{"entityid":"http://flask-pysa
 # Running
 
 ```shell
-FLASK_APP=flask_pysaml2_example FLASK_DEBUG=1 flask run --port 5000
+FLASK_APP=flask_pysaml2_example FLASK_DEBUG=1 uv run flask run --port 5000
 ```
 
 Or with Docker:
@@ -137,5 +137,5 @@ After basic validation, run the extended checks in saml.oktadev.com using
 Run unit tests:
 
 ```shell
-python3 -m unittest discover -s tests -p 'test_*.py'
+uv run python -m unittest discover -s tests -p 'test_*.py'
 ```
