@@ -81,6 +81,36 @@ Or with Docker:
 docker compose up
 ```
 
+# Minimal SP-Initiated Flow
+
+Use this path first if your goal is to understand the core pysaml2 flow with as
+little cognitive load as possible.
+
+1. Configure exactly one IdP in `instance/config.py` (or `SAML_IDP_SETTINGS_JSON`) with only `entityid` and `metadata_url`.
+2. Start the app and open `http://localhost:5000`.
+3. Click the IdP login link, which calls `/auth/saml/login/<idp_name>`.
+4. Complete login at the IdP and return to `/auth/saml/sso/<idp_name>`.
+5. Confirm you land on `/user` and that a local session/user was created.
+
+At this stage, focus on understanding the SP-initiated round trip:
+`login endpoint -> IdP redirect -> SAMLResponse POST to ACS -> local login`.
+
+# Hardened Flow (What Was Added And Why)
+
+After completing the minimal path, revisit the same flow and map each safeguard
+to a concrete risk.
+
+1. Request/response correlation with request IDs (`InResponseTo`) helps reject unsolicited or mismatched assertions.
+2. RelayState allowlisting blocks open-redirect abuse and ensures post-login navigation stays on trusted hosts.
+3. Metadata fetch timeout and cache reduce IdP metadata latency and avoid repeated network calls during login.
+4. Explicit status handling for auth failures (400/401/404/502/500) makes failures easier to reason about while learning.
+5. Unknown IdP handling avoids ambiguous behavior and teaches explicit trust boundaries in multi-IdP setups.
+6. JIT provisioning error handling keeps auth failures visible and prevents silent partial user creation.
+
+Use this second pass to connect behavior to intent: each check is not new
+functionality, but a defense or reliability improvement around the same basic
+SAML login flow.
+
 # SAML Flow (SP-Initiated)
 
 ```text

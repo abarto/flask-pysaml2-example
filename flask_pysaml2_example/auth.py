@@ -1,5 +1,7 @@
 import time
 
+from typing import TYPE_CHECKING, Any, TypedDict, cast
+
 from urllib.parse import urlparse
 from xml.sax.saxutils import escape
 
@@ -13,19 +15,35 @@ from . import db
 from .orm import User
 
 
+if TYPE_CHECKING:
+    from saml2.client import Saml2Client
+
+
+class MetadataCacheEntry(TypedDict):
+    """Cached IdP metadata payload and insertion timestamp."""
+
+    metadata: str
+    cached_at: float
+
+
 auth_blueprint = Blueprint('auth', __name__)
-_METADATA_CACHE = {}
+_METADATA_CACHE: dict[str, MetadataCacheEntry] = {}
 
 
-def _get_idp_settings(idp_name):
-    if idp_name not in current_app.config['SAML_IDP_SETTINGS']:
+def _get_idp_settings(idp_name: str) -> dict[str, Any]:
+    """Return configuration for the requested IdP name."""
+
+    idp_settings = cast(dict[str, Any], current_app.config['SAML_IDP_SETTINGS'])
+    if idp_name not in idp_settings:
         raise KeyError(f'Settings for IDP "{idp_name}" not found on SAML_IDP_SETTINGS.')
-    return current_app.config['SAML_IDP_SETTINGS'][idp_name]
+    return cast(dict[str, Any], idp_settings[idp_name])
 
 
-def _get_idp_metadata(metadata_url):
-    ttl = current_app.config.get('SAML_METADATA_CACHE_TTL_SECONDS', 3600)
-    timeout = current_app.config.get('SAML_METADATA_TIMEOUT_SECONDS', 5)
+def _get_idp_metadata(metadata_url: str) -> str:
+    """Fetch IdP metadata XML with simple in-memory TTL caching."""
+
+    ttl = int(current_app.config.get('SAML_METADATA_CACHE_TTL_SECONDS', 3600))
+    timeout = float(current_app.config.get('SAML_METADATA_TIMEOUT_SECONDS', 5))
     now = time.time()
     cached_entry = _METADATA_CACHE.get(metadata_url)
     if cached_entry and now - cached_entry['cached_at'] < ttl:
@@ -40,7 +58,9 @@ def _get_idp_metadata(metadata_url):
     return response.text
 
 
-def _is_safe_redirect_url(url):
+def _is_safe_redirect_url(url: str) -> bool:
+    """Allow only relative paths or hosts explicitly trusted by config."""
+
     parsed_url = urlparse(url)
 
     if parsed_url.scheme in ('',) and not parsed_url.netloc:
@@ -49,12 +69,14 @@ def _is_safe_redirect_url(url):
     if parsed_url.scheme not in ('http', 'https'):
         return False
 
-    allowed_hosts = set(current_app.config.get('ALLOWED_REDIRECT_HOSTS', ()))
+    allowed_hosts = set(cast(list[str] | tuple[str, ...], current_app.config.get('ALLOWED_REDIRECT_HOSTS', ())))
     allowed_hosts.add(request.host)
     return parsed_url.netloc in allowed_hosts
 
 
-def _resolve_relay_state(default_redirect):
+def _resolve_relay_state(default_redirect: str) -> str:
+    """Resolve RelayState from the SAML POST while enforcing safe redirects."""
+
     relay_state = request.form.get('RelayState')
     if not relay_state:
         return default_redirect
@@ -66,17 +88,25 @@ def _resolve_relay_state(default_redirect):
     return default_redirect
 
 
-def _get_attribute(available_attributes, attribute_names, default=''):
+def _get_attribute(
+    available_attributes: dict[str, list[str]],
+    attribute_names: tuple[str, ...],
+    default: str = '',
+) -> str:
+    """Return the first non-empty attribute value from known aliases."""
+
     for attribute_name in attribute_names:
         if attribute_name in available_attributes and available_attributes[attribute_name]:
             return available_attributes[attribute_name][0]
     return default
 
 
-def _build_sp_metadata_xml(idp_name):
+def _build_sp_metadata_xml(idp_name: str) -> str:
+    """Build minimal SP metadata XML for a given IdP configuration."""
+
     idp_settings = _get_idp_settings(idp_name)
     acs_url = url_for('auth.saml_sso', idp_name=idp_name, _external=True)
-    entity_id = idp_settings.get('entityid', acs_url)
+    entity_id = str(idp_settings.get('entityid', acs_url))
 
     return f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"{escape(entity_id)}\">
@@ -87,11 +117,15 @@ def _build_sp_metadata_xml(idp_name):
 """.strip()
 
 
-def load_user(user_id):
+def load_user(user_id: str) -> User | None:
+    """Resolve a logged-in principal from its SAML subject identifier."""
+
     return User.query.filter_by(email=user_id).first()
 
 
-def _saml_client_for_request(idp_name):
+def _saml_client_for_request(idp_name: str) -> 'Saml2Client':
+    """Create a SAML client and map initialization failures to HTTP errors."""
+
     try:
         return saml_client_for(idp_name)
     except KeyError:
@@ -105,20 +139,21 @@ def _saml_client_for_request(idp_name):
         abort(500)
 
 
-def saml_client_for(idp_name):
-    """Given the name of an IdP, return a configuration for saml2.config.Config."""
+def saml_client_for(idp_name: str) -> 'Saml2Client':
+    """Build and return a configured pysaml2 client for one IdP."""
+
     idp_settings = _get_idp_settings(idp_name)
 
     acs_url = url_for('auth.saml_sso', idp_name=idp_name, _external=True)
     https_acs_url = url_for('auth.saml_sso', idp_name=idp_name, _external=True, _scheme='https')
 
-    metadata = _get_idp_metadata(idp_settings['metadata_url'])
-    entityid = idp_settings.get('entityid', acs_url)
+    metadata = _get_idp_metadata(str(idp_settings['metadata_url']))
+    entityid = str(idp_settings.get('entityid', acs_url))
 
     from saml2.client import Saml2Client
     from saml2.config import Config as Saml2Config
 
-    settings = {
+    settings: dict[str, Any] = {
         'entityid': entityid,
         'metadata': {'inline': [metadata]},
         'service': {
@@ -134,10 +169,10 @@ def saml_client_for(idp_name):
                 # Validate responses against known authn request IDs.
                 'allow_unsolicited': False,
                 # Most IdPs support unsigned requests; keep this configurable.
-                'authn_requests_signed': idp_settings.get('authn_requests_signed', False),
+                'authn_requests_signed': bool(idp_settings.get('authn_requests_signed', False)),
                 'logout_requests_signed': True,
                 'want_assertions_signed': True,
-                'want_response_signed': idp_settings.get('want_response_signed', True),
+                'want_response_signed': bool(idp_settings.get('want_response_signed', True)),
             }
         },
     }
@@ -149,7 +184,9 @@ def saml_client_for(idp_name):
 
 
 @auth_blueprint.route('/saml/sso/<idp_name>', methods=['POST'])
-def saml_sso(idp_name):
+def saml_sso(idp_name: str) -> Response:
+    """Handle ACS POSTs, validate assertions, and establish a local session."""
+
     saml_response = request.form.get('SAMLResponse')
     if not saml_response:
         current_app.logger.info('Missing SAMLResponse for IdP %s', idp_name)
@@ -157,7 +194,7 @@ def saml_sso(idp_name):
 
     saml_client = _saml_client_for_request(idp_name)
 
-    outstanding_requests = session.get('saml_outstanding_requests', {})
+    outstanding_requests = cast(dict[str, str], session.get('saml_outstanding_requests', {}))
     try:
         authn_response = saml_client.parse_authn_request_response(
             saml_response,
@@ -185,7 +222,10 @@ def saml_sso(idp_name):
         user = load_user(user_id)
         if user is None:
             db_session = db.session()
-            attribute_mapping = current_app.config.get('SAML_ATTRIBUTE_MAPPING', {})
+            attribute_mapping = cast(
+                dict[str, tuple[str, ...]],
+                current_app.config.get('SAML_ATTRIBUTE_MAPPING', {}),
+            )
             user = User(
                 email=user_id,
                 first_name=_get_attribute(
@@ -215,7 +255,9 @@ def saml_sso(idp_name):
 
 
 @auth_blueprint.route('/saml/login/<idp_name>')
-def saml_login(idp_name):
+def saml_login(idp_name: str) -> Response:
+    """Start SP-initiated login by redirecting to the IdP SSO endpoint."""
+
     saml_client = _saml_client_for_request(idp_name)
     relay_state = request.args.get('next', url_for('user'))
     if not _is_safe_redirect_url(relay_state):
@@ -227,7 +269,7 @@ def saml_login(idp_name):
         current_app.logger.exception('Failed to prepare SAML AuthnRequest for IdP %s', idp_name)
         abort(500)
 
-    outstanding_requests = session.get('saml_outstanding_requests', {})
+    outstanding_requests = cast(dict[str, str], session.get('saml_outstanding_requests', {}))
     outstanding_requests[reqid] = relay_state
     session['saml_outstanding_requests'] = outstanding_requests
 
@@ -247,7 +289,9 @@ def saml_login(idp_name):
 
 
 @auth_blueprint.route('/saml/metadata/<idp_name>', methods=['GET'])
-def saml_metadata(idp_name):
+def saml_metadata(idp_name: str) -> Response:
+    """Return SP metadata XML for the selected IdP setup."""
+
     try:
         metadata_xml = _build_sp_metadata_xml(idp_name)
         return Response(metadata_xml, mimetype='application/samlmetadata+xml')
@@ -257,6 +301,8 @@ def saml_metadata(idp_name):
 
 @auth_blueprint.route('/logout')
 @login_required
-def logout():
+def logout() -> Response:
+    """Clear the local authenticated session and return to the index page."""
+
     logout_user()
     return redirect(url_for('index'))
