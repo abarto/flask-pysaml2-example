@@ -27,6 +27,7 @@ class MetadataCacheEntry(TypedDict):
 
 
 auth_blueprint = Blueprint('auth', __name__)
+# Demo-only in-process cache; use a proper shared cache backend in production.
 _METADATA_CACHE: dict[str, MetadataCacheEntry] = {}
 
 
