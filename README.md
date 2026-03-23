@@ -23,7 +23,7 @@ safer for real-world deployments:
 
 # Requirements
 
-- [python](https://www.python.org/) 3.11+
+- [python](https://www.python.org/) 3.12+
 - [uv](https://docs.astral.sh/uv/)
 
 You also need build dependencies for PySAML2 (`libffi` and `xmlsec1`).
