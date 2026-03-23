@@ -1,6 +1,7 @@
 import time
 
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any, cast
 
 from urllib.parse import urlparse
 from xml.sax.saxutils import escape
@@ -8,6 +9,7 @@ from xml.sax.saxutils import escape
 import requests
 
 from flask import Blueprint, Response, abort, current_app, redirect, request, session, url_for
+from flask.typing import ResponseReturnValue
 from flask_login import login_required, login_user, logout_user
 from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
 
@@ -19,16 +21,22 @@ if TYPE_CHECKING:
     from saml2.client import Saml2Client
 
 
-class MetadataCacheEntry(TypedDict):
-    """Cached IdP metadata payload and insertion timestamp."""
-
-    metadata: str
-    cached_at: float
-
-
 auth_blueprint = Blueprint('auth', __name__)
-# Demo-only in-process cache; use a proper shared cache backend in production.
-_METADATA_CACHE: dict[str, MetadataCacheEntry] = {}
+
+
+def _fetch_idp_metadata_from_network(metadata_url: str, timeout: float) -> str:
+    """Download IdP metadata XML from the remote metadata URL."""
+
+    response = requests.get(metadata_url, timeout=timeout)
+    response.raise_for_status()
+    return response.text
+
+
+@lru_cache(maxsize=128)
+def _get_idp_metadata_for_bucket(metadata_url: str, timeout: float, ttl_bucket: int) -> str:
+    """Cache metadata per URL and TTL bucket using stdlib LRU storage."""
+
+    return _fetch_idp_metadata_from_network(metadata_url, timeout)
 
 
 def _get_idp_settings(idp_name: str) -> dict[str, Any]:
@@ -41,22 +49,20 @@ def _get_idp_settings(idp_name: str) -> dict[str, Any]:
 
 
 def _get_idp_metadata(metadata_url: str) -> str:
-    """Fetch IdP metadata XML with simple in-memory TTL caching."""
+    """Fetch IdP metadata XML with in-process TTL caching via lru_cache."""
 
     ttl = int(current_app.config.get('SAML_METADATA_CACHE_TTL_SECONDS', 3600))
     timeout = float(current_app.config.get('SAML_METADATA_TIMEOUT_SECONDS', 5))
-    now = time.time()
-    cached_entry = _METADATA_CACHE.get(metadata_url)
-    if cached_entry and now - cached_entry['cached_at'] < ttl:
-        return cached_entry['metadata']
 
-    response = requests.get(metadata_url, timeout=timeout)
-    response.raise_for_status()
-    _METADATA_CACHE[metadata_url] = {
-        'metadata': response.text,
-        'cached_at': now,
-    }
-    return response.text
+    if ttl <= 0:
+        return _fetch_idp_metadata_from_network(metadata_url, timeout)
+
+    # Bucket math groups time into fixed ttl-sized windows (for ttl=3600,
+    # any timestamp in the same hour shares the same bucket value). Because
+    # the bucket is part of the lru_cache key, crossing into a new window
+    # changes the key and forces a fresh metadata fetch.
+    ttl_bucket = int(time.time() // ttl)
+    return _get_idp_metadata_for_bucket(metadata_url, timeout, ttl_bucket)
 
 
 def _is_safe_redirect_url(url: str) -> bool:
@@ -185,7 +191,7 @@ def saml_client_for(idp_name: str) -> 'Saml2Client':
 
 
 @auth_blueprint.route('/saml/sso/<idp_name>', methods=['POST'])
-def saml_sso(idp_name: str) -> Response:
+def saml_sso(idp_name: str) -> ResponseReturnValue:
     """Handle ACS POSTs, validate assertions, and establish a local session."""
 
     saml_response = request.form.get('SAMLResponse')
@@ -256,7 +262,7 @@ def saml_sso(idp_name: str) -> Response:
 
 
 @auth_blueprint.route('/saml/login/<idp_name>')
-def saml_login(idp_name: str) -> Response:
+def saml_login(idp_name: str) -> ResponseReturnValue:
     """Start SP-initiated login by redirecting to the IdP SSO endpoint."""
 
     saml_client = _saml_client_for_request(idp_name)
@@ -290,7 +296,7 @@ def saml_login(idp_name: str) -> Response:
 
 
 @auth_blueprint.route('/saml/metadata/<idp_name>', methods=['GET'])
-def saml_metadata(idp_name: str) -> Response:
+def saml_metadata(idp_name: str) -> ResponseReturnValue:
     """Return SP metadata XML for the selected IdP setup."""
 
     try:
@@ -302,7 +308,7 @@ def saml_metadata(idp_name: str) -> Response:
 
 @auth_blueprint.route('/logout')
 @login_required
-def logout() -> Response:
+def logout() -> ResponseReturnValue:
     """Clear the local authenticated session and return to the index page."""
 
     logout_user()

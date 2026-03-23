@@ -22,3 +22,17 @@ include = ["flask_pysaml2_example*"]
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "types-requests>=2.32.4.20260107",
+]
+
+[tool.mypy]
+python_version = "3.12"
+exclude = ["^docs/"]
+
+[[tool.mypy.overrides]]
+module = ["flask_login", "saml2", "saml2.*"]
+ignore_missing_imports = true
