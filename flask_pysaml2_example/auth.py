@@ -1,6 +1,3 @@
-import time
-
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast
 
 from urllib.parse import urlparse
@@ -13,7 +10,7 @@ from flask.typing import ResponseReturnValue
 from flask_login import login_required, login_user, logout_user
 from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
 
-from . import db
+from . import cache, db
 from .orm import User
 
 
@@ -22,21 +19,6 @@ if TYPE_CHECKING:
 
 
 auth_blueprint = Blueprint('auth', __name__)
-
-
-def _fetch_idp_metadata_from_network(metadata_url: str, timeout: float) -> str:
-    """Download IdP metadata XML from the remote metadata URL."""
-
-    response = requests.get(metadata_url, timeout=timeout)
-    response.raise_for_status()
-    return response.text
-
-
-@lru_cache(maxsize=128)
-def _get_idp_metadata_for_bucket(metadata_url: str, timeout: float, ttl_bucket: int) -> str:
-    """Cache metadata per URL and TTL bucket using stdlib LRU storage."""
-
-    return _fetch_idp_metadata_from_network(metadata_url, timeout)
 
 
 def _get_idp_settings(idp_name: str) -> dict[str, Any]:
@@ -49,20 +31,25 @@ def _get_idp_settings(idp_name: str) -> dict[str, Any]:
 
 
 def _get_idp_metadata(metadata_url: str) -> str:
-    """Fetch IdP metadata XML with in-process TTL caching via lru_cache."""
+    """Fetch IdP metadata XML and cache it using Flask-Caching."""
 
     ttl = int(current_app.config.get('SAML_METADATA_CACHE_TTL_SECONDS', 3600))
     timeout = float(current_app.config.get('SAML_METADATA_TIMEOUT_SECONDS', 5))
+    cache_key = f'saml:idp-metadata:{metadata_url}'
 
-    if ttl <= 0:
-        return _fetch_idp_metadata_from_network(metadata_url, timeout)
+    if ttl > 0:
+        cached_metadata = cast(str | None, cache.get(cache_key))
+        if cached_metadata is not None:
+            return cached_metadata
 
-    # Bucket math groups time into fixed ttl-sized windows (for ttl=3600,
-    # any timestamp in the same hour shares the same bucket value). Because
-    # the bucket is part of the lru_cache key, crossing into a new window
-    # changes the key and forces a fresh metadata fetch.
-    ttl_bucket = int(time.time() // ttl)
-    return _get_idp_metadata_for_bucket(metadata_url, timeout, ttl_bucket)
+    response = requests.get(metadata_url, timeout=timeout)
+    response.raise_for_status()
+    metadata = response.text
+
+    if ttl > 0:
+        cache.set(cache_key, metadata, timeout=ttl)
+
+    return metadata
 
 
 def _is_safe_redirect_url(url: str) -> bool:

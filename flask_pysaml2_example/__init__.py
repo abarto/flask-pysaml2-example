@@ -5,12 +5,14 @@ import os
 from pathlib import Path
 
 from flask import Flask, render_template
+from flask_caching import Cache
 from flask_login import LoginManager, login_required
 from flask_sqlalchemy import SQLAlchemy
 
 
 db = SQLAlchemy()
 login_manager = LoginManager()
+cache = Cache()
 
 
 def create_app(test_config=None):
@@ -25,6 +27,7 @@ def create_app(test_config=None):
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE='Lax',
         SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', 'false').lower() == 'true',
+        CACHE_TYPE='SimpleCache',
         ALLOWED_REDIRECT_HOSTS=(),
         SAML_METADATA_CACHE_TTL_SECONDS=3600,
         SAML_METADATA_TIMEOUT_SECONDS=5,
@@ -72,6 +75,7 @@ def create_app(test_config=None):
     Path(app.instance_path).mkdir(exist_ok=True)
 
     db.init_app(app)
+    cache.init_app(app)
 
     with app.app_context():
         from .orm import User
