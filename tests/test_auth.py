@@ -2,6 +2,8 @@ import unittest
 
 from unittest.mock import patch
 
+import requests
+
 from flask_pysaml2_example import create_app
 
 
@@ -85,6 +87,58 @@ class AuthRoutesTestCase(unittest.TestCase):
 
         with self.client.session_transaction() as session_state:
             self.assertNotIn('request-id', session_state.get('saml_outstanding_requests', {}))
+
+    def test_saml_login_returns_not_found_for_unknown_idp(self):
+        response = self.client.get('/auth/saml/login/unknown-idp')
+        self.assertEqual(response.status_code, 404)
+
+    @patch('flask_pysaml2_example.auth._get_idp_metadata')
+    def test_saml_login_returns_bad_gateway_when_metadata_fetch_fails(self, mock_get_idp_metadata):
+        mock_get_idp_metadata.side_effect = requests.exceptions.Timeout('metadata timeout')
+
+        response = self.client.get('/auth/saml/login/example-idp')
+        self.assertEqual(response.status_code, 502)
+
+    @patch('flask_pysaml2_example.auth.saml_client_for')
+    def test_saml_sso_rejects_missing_saml_response(self, mock_saml_client_for):
+        response = self.client.post('/auth/saml/sso/example-idp', data={})
+
+        self.assertEqual(response.status_code, 400)
+        mock_saml_client_for.assert_not_called()
+
+    @patch('flask_pysaml2_example.auth.saml_client_for')
+    def test_saml_sso_returns_unauthorized_for_invalid_saml_response(self, mock_saml_client_for):
+        fake_client = mock_saml_client_for.return_value
+        fake_client.parse_authn_request_response.side_effect = ValueError('bad assertion')
+
+        with self.client.session_transaction() as session_state:
+            session_state['saml_outstanding_requests'] = {'request-id': '/user'}
+
+        response = self.client.post(
+            '/auth/saml/sso/example-idp',
+            data={
+                'SAMLResponse': 'not-valid',
+            },
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    @patch('flask_pysaml2_example.auth.saml_client_for')
+    def test_saml_sso_returns_unauthorized_when_subject_is_missing(self, mock_saml_client_for):
+        fake_client = mock_saml_client_for.return_value
+        fake_client.parse_authn_request_response.return_value = FakeAuthnResponse(user_id=None)
+
+        with self.client.session_transaction() as session_state:
+            session_state['saml_outstanding_requests'] = {'request-id': '/user'}
+
+        response = self.client.post(
+            '/auth/saml/sso/example-idp',
+            data={
+                'SAMLResponse': 'signed-response',
+            },
+        )
+
+        self.assertEqual(response.status_code, 401)
 
 
 if __name__ == '__main__':

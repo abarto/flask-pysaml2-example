@@ -8,8 +8,6 @@ import requests
 from flask import Blueprint, Response, abort, current_app, redirect, request, session, url_for
 from flask_login import login_required, login_user, logout_user
 from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
-from saml2.client import Saml2Client
-from saml2.config import Config as Saml2Config
 
 from . import db
 from .orm import User
@@ -93,9 +91,22 @@ def load_user(user_id):
     return User.query.filter_by(email=user_id).first()
 
 
+def _saml_client_for_request(idp_name):
+    try:
+        return saml_client_for(idp_name)
+    except KeyError:
+        current_app.logger.info('Unknown SAML IdP requested: %s', idp_name)
+        abort(404)
+    except requests.RequestException:
+        current_app.logger.warning('Failed to fetch SAML metadata for IdP %s', idp_name, exc_info=True)
+        abort(502)
+    except Exception:
+        current_app.logger.exception('Failed to initialize SAML client for IdP %s', idp_name)
+        abort(500)
+
+
 def saml_client_for(idp_name):
     """Given the name of an IdP, return a configuration for saml2.config.Config."""
-
     idp_settings = _get_idp_settings(idp_name)
 
     acs_url = url_for('auth.saml_sso', idp_name=idp_name, _external=True)
@@ -103,6 +114,9 @@ def saml_client_for(idp_name):
 
     metadata = _get_idp_metadata(idp_settings['metadata_url'])
     entityid = idp_settings.get('entityid', acs_url)
+
+    from saml2.client import Saml2Client
+    from saml2.config import Config as Saml2Config
 
     settings = {
         'entityid': entityid,
@@ -136,31 +150,37 @@ def saml_client_for(idp_name):
 
 @auth_blueprint.route('/saml/sso/<idp_name>', methods=['POST'])
 def saml_sso(idp_name):
+    saml_response = request.form.get('SAMLResponse')
+    if not saml_response:
+        current_app.logger.info('Missing SAMLResponse for IdP %s', idp_name)
+        abort(400)
+
+    saml_client = _saml_client_for_request(idp_name)
+
+    outstanding_requests = session.get('saml_outstanding_requests', {})
     try:
-        saml_client = saml_client_for(idp_name)
-
-        saml_response = request.form.get('SAMLResponse')
-        if not saml_response:
-            abort(401)
-
-        outstanding_requests = session.get('saml_outstanding_requests', {})
         authn_response = saml_client.parse_authn_request_response(
             saml_response,
             BINDING_HTTP_POST,
             outstanding=outstanding_requests,
         )
+    except Exception:
+        current_app.logger.warning('Invalid SAML response for IdP %s', idp_name, exc_info=True)
+        abort(401)
 
-        authn_response.get_identity()
-        subject = authn_response.get_subject()
-        user_id = subject.text if subject else None
-        if not user_id:
-            abort(401)
+    authn_response.get_identity()
+    subject = authn_response.get_subject()
+    user_id = subject.text if subject else None
+    if not user_id:
+        current_app.logger.warning('SAML response missing subject for IdP %s', idp_name)
+        abort(401)
 
-        in_response_to = getattr(authn_response, 'in_response_to', None)
-        if in_response_to:
-            outstanding_requests.pop(in_response_to, None)
-            session['saml_outstanding_requests'] = outstanding_requests
+    in_response_to = getattr(authn_response, 'in_response_to', None)
+    if in_response_to:
+        outstanding_requests.pop(in_response_to, None)
+        session['saml_outstanding_requests'] = outstanding_requests
 
+    try:
         # This is known as "Just In Time (JIT) provisioning".
         user = load_user(user_id)
         if user is None:
@@ -181,32 +201,42 @@ def saml_sso(idp_name):
             )
             db_session.add(user)
             db_session.commit()
-
-        session['saml_attributes'] = authn_response.ava
-        login_user(user)
-
-        redirect_url = _resolve_relay_state(url_for('user'))
-        current_app.logger.info('User %s successfully authenticated via SAML', user_id)
-        return redirect(redirect_url)
     except Exception:
-        current_app.logger.exception('Exception raised during SAML SSO login')
-        abort(401)
+        db.session.rollback()
+        current_app.logger.exception('Failed to provision user during SAML login for %s', user_id)
+        abort(500)
+
+    session['saml_attributes'] = authn_response.ava
+    login_user(user)
+
+    redirect_url = _resolve_relay_state(url_for('user'))
+    current_app.logger.info('User %s successfully authenticated via SAML', user_id)
+    return redirect(redirect_url)
 
 
 @auth_blueprint.route('/saml/login/<idp_name>')
 def saml_login(idp_name):
-    saml_client = saml_client_for(idp_name)
+    saml_client = _saml_client_for_request(idp_name)
     relay_state = request.args.get('next', url_for('user'))
     if not _is_safe_redirect_url(relay_state):
         relay_state = url_for('user')
-    reqid, info = saml_client.prepare_for_authenticate(relay_state=relay_state)
+
+    try:
+        reqid, info = saml_client.prepare_for_authenticate(relay_state=relay_state)
+    except Exception:
+        current_app.logger.exception('Failed to prepare SAML AuthnRequest for IdP %s', idp_name)
+        abort(500)
 
     outstanding_requests = session.get('saml_outstanding_requests', {})
     outstanding_requests[reqid] = relay_state
     session['saml_outstanding_requests'] = outstanding_requests
 
     # Select the IdP URL to send the AuthN request to.
-    _, redirect_url = next(filter(lambda k_v: k_v[0] == 'Location', info['headers']))
+    try:
+        _, redirect_url = next(filter(lambda k_v: k_v[0] == 'Location', info['headers']))
+    except (KeyError, StopIteration):
+        current_app.logger.error('SAML client did not return redirect location for IdP %s', idp_name)
+        abort(502)
 
     response = redirect(redirect_url, code=302)
 
